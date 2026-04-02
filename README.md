@@ -1,4 +1,4 @@
-# Aquarela
+<img width="1584" height="672" alt="image" src="https://github.com/user-attachments/assets/1ef64c75-da27-44eb-b766-221c83d3a1f3" />
 
 Pluggable price curves for Uniswap v4.
 
