@@ -9,78 +9,77 @@ What
 
 A v4 hook system with two layers of modularity:
 
-1. Pricing Curves — Replace v4's swap math with custom invariants
-2. LDFs — Shape liquidity distribution within a curve
+1. Curve Hooks — Each curve type is its own v4 hook, replacing swap math entirely
+2. LDFs — Shape liquidity distribution within a curve hook
 
-One hook. Any curve. Any distribution. PCPartPicker for AMMs.
+Any curve. Any distribution. PCPartPicker for AMMs.
 
 ---
 
 Architecture
 
-Singleton hook pattern. One AquarelaHook deployed once, delegates to external curve and LDF contracts per pool. Pool creation lives on the hook — no separate factory.
+Curve-as-hook pattern. Each curve type is its own v4 hook contract with its own state, config, and permissions. Shared logic lives in a base contract and libraries. LDFs are external contracts called by hooks that support them.
 
 ```
-AquarelaHook (singleton v4 hook — routing, LP management, fees)
+BaseAquarelaHook (shared logic — validation, fees)
     │
-    ├── IPricingCurve (external contracts — pure swap math)
-    │     ├── GaussianCurve (pm-AMM for prediction markets)
-    │     └── PassthroughCurve (native v4 CPMM)
+    ├── GaussianHook (pm-AMM for prediction markets)
+    │     └── owns: sigma, expiry, resolver, totalLiquidity
     │
-    └── ILDF (external contracts — liquidity distribution)
-          └── GeometricLDF (concentrates liquidity around current price)
+    └── PassthroughHook (native v4 CPMM + LDF)
+          ├── owns: ldf address, ldfParams, totalLiquidity
+          └── ILDF (external contracts — liquidity distribution)
+                └── GeometricLDF (concentrates liquidity around current price)
 ```
 
-Why singleton:
-- Shared logic (validation, fees, LP, events) lives in one place
-- Curves and LDFs are pure math — easy to add, test, audit independently
-- Bytecode stays under 24KB limit — extract libraries as hook grows
-- Proven at production scale by Bunni v2
-
-If a future curve needs different v4 hook permissions, deploy it as its own hook. Curves are external contracts — they work with either the singleton or a dedicated hook. Same interface.
+Why curve-as-hook:
+- Each hook owns its own config struct — no shared struct gymnastics
+- Different curves can use different v4 hook permissions
+- Clean separation — prediction market logic stays in GaussianHook, CPMM logic stays in PassthroughHook
+- Shared logic (validation, fees) lives in BaseAquarelaHook base contract
+- Shared math lives in libraries (GaussianMath, ProbabilityMath)
 
 ---
 
 Contracts
 
 Core:
-- AquarelaHook — singleton v4 hook, curve-agnostic routing, pool creation
-- IPricingCurve — interface all curves implement
+- BaseAquarelaHook — shared hook base (onlyPoolManager, common logic)
 - ILDF — interface all LDFs implement
 
-MVP Curves:
-- GaussianCurve — pm-AMM for prediction markets (Paradigm paper)
-- PassthroughCurve — delegates to v4 native CPMM, supports LDF plugins
+MVP Hooks:
+- GaussianHook — pm-AMM for prediction markets (Paradigm paper)
+- PassthroughHook — native v4 CPMM with LDF plugins
 
 MVP LDF:
 - GeometricLDF — concentrates liquidity around current price
 
 Future:
-- StableSwapCurve, more LDFs (uniform, buy-the-dip, etc.)
-- Fee strategy contracts, oracle integrations as pluggable components
+- StableSwapHook, more LDFs (uniform, buy-the-dip, etc.)
+- Fee strategy contracts, oracle integrations
 
 ---
 
 How Swaps Work
 
-1. beforeSwap fires on AquarelaHook
-2. Hook reads pool config (curve address, LDF address, params)
-3. Hook calls the curve contract for swap math
-4. Curve calls its LDF (if any) for liquidity distribution
-5. Hook returns BeforeSwapDelta with computed amounts
-6. v4 uses the delta, skips internal CPMM
-7. v4 handles token accounting only
+1. beforeSwap fires on the pool's hook (GaussianHook or PassthroughHook)
+2. Hook computes swap math using its own invariant and state
+3. For PassthroughHook: queries LDF for liquidity distribution
+4. Hook returns BeforeSwapDelta with computed amounts
+5. v4 uses the delta, skips internal CPMM
+6. v4 handles token accounting only
 
 Uses BEFORE_SWAP_RETURNS_DELTA permission.
 
 ---
 
-GaussianCurve Params
+GaussianHook Params
 
-| Param  | Description                               |
-| ------ | ----------------------------------------- |
-| sigma  | Spread — how much trading moves the price |
-| expiry | Resolution timestamp — market closes here |
+| Param    | Description                               |
+| -------- | ----------------------------------------- |
+| sigma    | Spread — how much trading moves the price |
+| expiry   | Resolution timestamp — market closes here |
+| resolver | Address authorized to resolve the market  |
 
 Liquidity shrinks as expiry approaches: b(t) = sigma * sqrt(T - t)
 
@@ -91,7 +90,7 @@ Security Flags
 - Rounding direction: always round AGAINST withdrawer (Bunni exploit)
 - onlyPoolManager on all hook callbacks
 - Pool key validation
-- Pricing curve and LDF contracts must be stateless (pure math)
+- LDF contracts must be stateless (pure math)
 - Minimum withdrawal thresholds to block dust attacks
 
 ---
@@ -99,10 +98,9 @@ Security Flags
 MVP Scope (10 weeks — UHI)
 
 In:
-- AquarelaHook (singleton)
-- GaussianCurve
-- PassthroughCurve + GeometricLDF
-- Pool creation on the hook
+- GaussianHook
+- PassthroughHook + GeometricLDF
+- BaseAquarelaHook
 - Basic frontend (Next.js + wagmi)
 - Testnet deployment
 
@@ -117,7 +115,7 @@ Out:
 
 Roadmap
 
-v2: More LDFs, StableSwapCurve, fee strategy plugins, mainnet + audit
+v2: More LDFs, StableSwapHook, fee strategy plugins, mainnet + audit
 
 v3: am-AMM for LVR recapture, auto-rebalancing, multi-outcome markets, parlay contracts
 
@@ -125,6 +123,6 @@ v3: am-AMM for LVR recapture, auto-rebalancing, multi-outcome markets, parlay co
 
 Open Questions
 
-1. Normal CDF in Solidity — polynomial approximation vs lookup table?
-2. Mapping [0,1] probability to sqrtPriceX96 tick space?
-3. Resolution mechanism — external oracle or trusted resolver for MVP?
+1. Normal CDF in Solidity — polynomial approximation (Abramowitz & Stegun)
+2. Mapping [0,1] probability to sqrtPriceX96 tick space — sqrt(p/(1-p)) * 2^96
+3. Resolution mechanism — trusted resolver for MVP, oracle integration in v2

@@ -1,16 +1,13 @@
 # Aquarela MVP Build Plan
 
-## Context
+## Architecture
 
-Aquarela is a Uniswap v4 hook system with pluggable pricing curves and LDFs. The codebase is a blank slate — fresh Foundry template + Next.js scaffold. No v4 deps, no contracts, no tests. This plan covers the full MVP build from zero.
-
-## Architecture (Decided)
-
-- Singleton AquarelaHook — one deployment, delegates to external curve/LDF contracts per pool
-- Pool creation on the hook (no separate factory)
-- Curves implement `IPricingCurve`, LDFs implement `ILDF` — both stateless view contracts
-- Libraries for shared/heavy logic (size management)
-- If a future curve needs different hook permissions, deploy it as its own hook
+- Curve-as-hook — each curve type is its own v4 hook contract
+- GaussianHook for prediction markets, PassthroughHook for standard CPMM + LDF
+- BaseAquarelaHook base contract for shared logic (validation, fee handling)
+- Shared math/utility libraries (GaussianMath, ProbabilityMath, etc.)
+- LDFs are external contracts implementing `ILDF`, called by hooks that support them
+- Each hook owns its own per-pool config struct, state, and permissions
 
 ## Open Questions — Recommendations
 
@@ -20,18 +17,18 @@ Aquarela is a Uniswap v4 hook system with pluggable pricing curves and LDFs. The
 
 ## Implementation Phases
 
-### Phase 0: Foundation
-- [ ] Install v4-core, v4-periphery, solady via forge
-- [ ] Configure foundry.toml (solc 0.8.26, cancun EVM, remappings)
-- [ ] Create directory structure (src/, interfaces/, curves/, ldfs/, libraries/, types/, test/)
-- [ ] Delete Counter placeholder
+### Phase 0: Foundation [DONE]
+- [x] Install v4-core, v4-periphery, solady via forge
+- [x] Configure foundry.toml (solc 0.8.26, cancun EVM, remappings)
+- [x] Create directory structure
+- [x] Delete Counter placeholder
 - **Gate**: `forge build` compiles
 
 ### Phase 1: Types + Interfaces
-- [ ] `AquarelaTypes.sol` — PoolConfig struct
-- [ ] `IPricingCurve.sol` — computeSwap(), usesLDF(), name()
 - [ ] `ILDF.sol` — liquidityDensity(), cumulativeLiquidity(), name()
-- [ ] `IAquarelaHook.sol` — createPool(), resolvePool(), getPoolConfig(), events
+- [ ] `BaseAquarelaHook.sol` — shared hook base (onlyPoolManager, common LP logic)
+- [ ] GaussianHook config struct (sigma, expiry, resolver, totalLiquidity, etc.)
+- [ ] PassthroughHook config struct (ldf address, ldfParams, totalLiquidity, etc.)
 - **Gate**: `forge build` compiles
 
 ### Phase 2: Math Libraries
@@ -40,25 +37,20 @@ Aquarela is a Uniswap v4 hook system with pluggable pricing curves and LDFs. The
 - [ ] Tests: known values, symmetry, monotonicity, roundtrip, fuzz
 - **Gate**: `forge test --match-path "test/libraries/*"` passes
 
-### Phase 3: AquarelaHook Skeleton
-- [ ] Singleton hook inheriting BaseHook
-- [ ] Permissions: beforeInitialize, beforeAddLiquidity, beforeRemoveLiquidity, beforeSwap, beforeSwapReturnDelta
+### Phase 3: GaussianHook (pm-AMM)
+- [ ] Inherits BaseAquarelaHook
+- [ ] Own per-pool config: sigma, expiry, resolver, resolved, outcome, totalLiquidity
 - [ ] createPool() stores config + calls poolManager.initialize()
-- [ ] beforeSwap delegates to IPricingCurve.computeSwap(), returns BeforeSwapDelta
-- [ ] AquarelaHookLogic library for heavy logic (size management)
-- [ ] Tests with mock curve: pool creation, swap delegation, resolution
-- **Gate**: `forge test --match-contract AquarelaHookTest` passes
-
-### Phase 4: GaussianCurve (pm-AMM)
-- [ ] Implements IPricingCurve
+- [ ] beforeSwap implements pm-AMM invariant directly
 - [ ] pm-AMM invariant: (y-x)Phi((y-x)/(L*b)) + L*b*phi((y-x)/(L*b)) - y = 0
 - [ ] Dynamic liquidity: b = sigma * sqrt(T - t)
-- [ ] Newton's method solver for invariant (3-5 iterations)
-- [ ] curveParams: sigma (uint128) + expiry (uint64) packed in bytes32
-- [ ] Tests: invariant preservation, price direction, time decay, boundary, fuzz
-- **Gate**: `forge test --match-contract GaussianCurveTest` passes
+- [ ] Newton's method solver (3-5 iterations)
+- [ ] resolvePool() — trusted resolver sets outcome
+- [ ] addLiquidity() / removeLiquidity() / withdrawResolved()
+- [ ] Tests: invariant preservation, price direction, time decay, resolution, LP lifecycle, fuzz
+- **Gate**: `forge test --match-contract GaussianHookTest` passes
 
-### Phase 5: GeometricLDF
+### Phase 4: GeometricLDF
 - [ ] Implements ILDF
 - [ ] Geometric density: (1-alpha) * alpha^|tick - currentTick|
 - [ ] Closed-form cumulative via geometric series
@@ -66,43 +58,38 @@ Aquarela is a Uniswap v4 hook system with pluggable pricing curves and LDFs. The
 - [ ] Tests: normalization, peak at current price, symmetry, alpha sensitivity, fuzz
 - **Gate**: `forge test --match-contract GeometricLDFTest` passes
 
-### Phase 6: PassthroughCurve
-- [ ] Implements IPricingCurve with usesLDF() = true
-- [ ] Standard x*y=k math weighted by LDF density
+### Phase 5: PassthroughHook (CPMM + LDF)
+- [ ] Inherits BaseAquarelaHook
+- [ ] Own per-pool config: ldf address, ldfParams, totalLiquidity
+- [ ] createPool() stores config + calls poolManager.initialize()
+- [ ] beforeSwap uses standard x*y=k math weighted by LDF density
 - [ ] Steps through price ranges where LDF density changes
-- [ ] Tests: matches CPMM with uniform LDF, more impact with concentrated LDF, conservation
-- **Gate**: `forge test --match-contract PassthroughCurveTest` passes
+- [ ] addLiquidity() / removeLiquidity()
+- [ ] Tests: matches CPMM with uniform LDF, more impact with concentrated LDF, conservation, LP lifecycle
+- **Gate**: `forge test --match-contract PassthroughHookTest` passes
 
-### Phase 7: LP Management
-- [ ] addLiquidity() / removeLiquidity() on the hook
-- [ ] withdrawResolved() for prediction market outcomes
-- [ ] Internal share accounting (mapping-based, no ERC20 for MVP)
-- [ ] Interacts with v4 via unlock callback pattern
-- [ ] Tests: full LP lifecycle, resolved market withdrawals
-- **Gate**: LP tests pass
-
-### Phase 8: Integration + Fuzz Tests
-- [ ] End-to-end: create pool -> add liquidity -> swap -> verify balances (both curve types)
-- [ ] Multi-swap sequences, multi-pool on same hook
+### Phase 6: Integration + Fuzz Tests
+- [ ] End-to-end: create pool -> add liquidity -> swap -> verify balances (both hook types)
+- [ ] Multi-swap sequences
 - [ ] Resolve prediction market -> LP withdrawal at outcome price
 - [ ] Fuzz: all math functions, swap conservation, LP accounting
 - **Gate**: `forge test` all pass, `forge test --fuzz-runs 10000` clean
 
-### Phase 9: Deploy Scripts
-- [ ] DeployAquarela.s.sol: deploy curves, LDFs, mine hook address (CREATE2), deploy hook
-- [ ] CreatePool.s.sol: example pool creation for both curve types
+### Phase 7: Deploy Scripts
+- [ ] DeployAquarela.s.sol: deploy both hooks (mine addresses for correct flag bits), deploy GeometricLDF
+- [ ] CreatePool.s.sol: example pool creation for both hook types
 - [ ] Target: Sepolia or Base Sepolia
 - **Gate**: `forge script --dry-run` succeeds
 
-### Phase 10: Frontend
+### Phase 8: Frontend
 - [ ] Install wagmi, viem, @tanstack/react-query
 - [ ] Web3 provider setup (WagmiProvider, chain config)
-- [ ] Pool creation page: curve/LDF selector, params, deploy
+- [ ] Pool creation page: hook type selector, LDF selector (for Passthrough), params, deploy
 - [ ] Swap page: pool selector, token amounts, quote, execute
 - [ ] Pool detail page: config, price, LP positions, resolve/withdraw
 - **Gate**: `pnpm build` succeeds, pages render
 
-### Phase 11: Testnet Deploy + Verify
+### Phase 9: Testnet Deploy + Verify
 - [ ] Deploy contracts to testnet
 - [ ] Verify on block explorer
 - [ ] Create test pools (both types)
@@ -112,41 +99,38 @@ Aquarela is a Uniswap v4 hook system with pluggable pricing curves and LDFs. The
 ## Dependency Graph
 
 ```
-Phase 0 -> Phase 1 -> Phase 2 -> Phase 3
-                                    |
-                         +----------+----------+
-                         |          |          |
-                      Phase 4   Phase 5   Phase 6 (needs 5)
-                         |          |          |
-                         +----------+----------+
-                                    |
-                                 Phase 7
-                                    |
-                                 Phase 8
-                                    |
-                              Phase 9 + 10 (parallel)
-                                    |
-                                 Phase 11
+Phase 0 -> Phase 1 -> Phase 2
+                         |
+                   +-----+-----+
+                   |           |
+                Phase 3     Phase 4 -> Phase 5
+                   |           |
+                   +-----+-----+
+                         |
+                      Phase 6
+                         |
+                    Phase 7 + 8 (parallel)
+                         |
+                      Phase 9
 ```
 
 ## Key Files
 
-- `contracts/src/AquarelaHook.sol` — singleton hook, central router
-- `contracts/src/interfaces/IPricingCurve.sol` — curve interface
+- `contracts/src/hooks/BaseAquarelaHook.sol` — shared hook base
+- `contracts/src/hooks/GaussianHook.sol` — pm-AMM prediction market hook
+- `contracts/src/hooks/PassthroughHook.sol` — CPMM + LDF hook
 - `contracts/src/interfaces/ILDF.sol` — LDF interface
 - `contracts/src/libraries/GaussianMath.sol` — CDF/PDF approximation
 - `contracts/src/libraries/ProbabilityMath.sol` — probability <-> sqrtPriceX96
-- `contracts/src/curves/GaussianCurve.sol` — pm-AMM implementation
-- `contracts/src/curves/PassthroughCurve.sol` — CPMM + LDF
 - `contracts/src/ldfs/GeometricLDF.sol` — geometric liquidity distribution
 
 ## Risk Areas
 
-1. **Contract size**: Monitor with `forge build --sizes`. Extract to AquarelaHookLogic library early.
-2. **Hook address mining**: v4 requires specific address bits. Use HookMiner for tests, CREATE2 salt mining for deploy.
+1. **Contract size**: Monitor with `forge build --sizes`. Extract heavy logic to libraries if needed.
+2. **Hook address mining**: v4 requires specific address bits per hook. Use HookMiner for tests, CREATE2 salt mining for deploy. Need to mine separately for each hook.
 3. **GaussianMath precision**: CDF approx has ~75 wei error in WAD. Newton solver tolerance at 1e12.
 4. **v4 API stability**: Pin v4-core/periphery to specific commits.
-5. **PassthroughCurve stepping**: Coarse grid (100-tick steps) for MVP, optimize later.
+5. **PassthroughHook stepping**: Coarse grid (100-tick steps) for MVP, optimize later.
 
 ## Verification
 
