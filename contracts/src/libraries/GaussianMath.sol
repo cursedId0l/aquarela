@@ -5,78 +5,83 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 /// @title Gaussian math for the pm-AMM invariant
 /// @notice Standard normal PDF and CDF in WAD (1e18) fixed-point
-/// @dev CDF implementation adapted from marcuspang/paradigm-guassian
-///      which uses the Dia (2023) approximation. Error rate < 1e-8.
-///      Original: https://github.com/marcuspang/paradigm-guassian/blob/main/src/GaussianCorrectness.sol
+/// @dev CDF/erfc adapted from primitivefinance/solstat (Gaussian.sol)
+///      Uses Abramowitz & Stegun / Numerical Recipes erfc approximation.
+///      Original: https://github.com/primitivefinance/solstat/blob/main/src/Gaussian.sol
 library GaussianMath {
     using FixedPointMathLib for int256;
+    using FixedPointMathLib for uint256;
 
     int256 private constant WAD = 1e18;
-    int256 private constant SQRT_2PI_WAD = 2_506628274631000502; // sqrt(2*pi) * 1e18
+    int256 private constant TWO = 2e18;
+    int256 private constant SQRT2 = 1_414213562373095048;
+    int256 private constant SQRT_2PI = 2_506628274631000502;
 
-    // Dia (2023) CDF approximation coefficients
-    int256 private constant B_0 = 2926786005158048154;
-    int256 private constant B_1_1 = 8972806590468173504;
-    int256 private constant B_1_2 = 10271570611713630789;
-    int256 private constant B_1_3 = 12723232619077609280;
-    int256 private constant B_1_4 = 16886395620079369078;
-    int256 private constant B_1_5 = 24123337745724791104;
-    int256 private constant B_2_1 = 5815825189335273905;
-    int256 private constant B_2_2 = 5703479358980514367;
-    int256 private constant B_2_3 = 5518624830257079631;
-    int256 private constant B_2_4 = 5261842395796042073;
-    int256 private constant B_2_5 = 4920813466328820329;
-    int256 private constant C_1_1 = 11615112262606032471;
-    int256 private constant C_1_2 = 18253232353473465248;
-    int256 private constant C_1_3 = 18388712257739384869;
-    int256 private constant C_1_4 = 18611933189717757950;
-    int256 private constant C_1_5 = 24148040728127628211;
-    int256 private constant C_2_1 = 3833629478001461794;
-    int256 private constant C_2_2 = 7307562585536735411;
-    int256 private constant C_2_3 = 8427423004580432404;
-    int256 private constant C_2_4 = 5664795188784707648;
-    int256 private constant C_2_5 = 4913960988952400752;
+    // erfc domain bounds — beyond these, returns 0 or 2
+    int256 private constant ERFC_DOMAIN_UPPER = 6.24e18;
+    int256 private constant ERFC_DOMAIN_LOWER = -6.24e18;
 
-    // @issue need to check that the rounding here is ok for this math
+    // Abramowitz & Stegun erfc coefficients
+    int256 private constant ERFC_A = 1_265512230000000000;
+    int256 private constant ERFC_B = 1_000023680000000000;
+    int256 private constant ERFC_C = 374091960000000000;
+    int256 private constant ERFC_D = 96784180000000000;
+    int256 private constant ERFC_E = -186288060000000000;
+    int256 private constant ERFC_F = 278868070000000000;
+    int256 private constant ERFC_G = -1_135203980000000000;
+    int256 private constant ERFC_H = 1_488515870000000000;
+    int256 private constant ERFC_I = -822152230000000000;
+    int256 private constant ERFC_J = 170872770000000000;
+
     // PDF gives the height of the bell curve at point x
     // Formula: pdf(x) = e^(-x²/2) / √(2π)
-    function pdf(int256 x) public pure returns (int256) {
-        int256 xSquared = x.rawSMulWad(x);
-        int256 exponent = -(xSquared / 2);
-        int256 numerator = exponent.expWad();
-        return numerator.sDivWad(SQRT_2PI_WAD);
+    function pdf(int256 x) internal pure returns (int256) {
+        int256 e = (-x * x) / TWO;
+        e = e.expWad();
+        return (e * WAD) / SQRT_2PI;
+    }
+
+    // Complementary error function: erfc(x) = 1 - erf(x)
+    // erfc(0) = 1, erfc(∞) = 0, erfc(-∞) = 2
+    function erfc(int256 input) internal pure returns (int256 output) {
+        if (input == 0) return WAD;
+        if (input >= ERFC_DOMAIN_UPPER) return 0;
+        if (input <= ERFC_DOMAIN_LOWER) return TWO;
+
+        uint256 z = _abs(input);
+        int256 t = (WAD * WAD) / (WAD + int256(z.divWad(2e18)));
+
+        int256 step;
+        {
+            step = ERFC_F + _mul(t, ERFC_G + _mul(t, ERFC_H + _mul(t, ERFC_I + _mul(t, ERFC_J))));
+        }
+
+        int256 k;
+        {
+            step = _mul(t, ERFC_B + _mul(t, ERFC_C + _mul(t, ERFC_D + _mul(t, ERFC_E + _mul(t, step)))));
+            k = (-1 * _mul(int256(z), int256(z))) - ERFC_A + step;
+        }
+
+        int256 exp = k.expWad();
+        int256 r = _mul(t, exp);
+        output = (input < 0) ? TWO - r : r;
     }
 
     // CDF gives the probability that a value falls below x, range [0, 1e18]
-    // Uses Dia (2023) rational polynomial approximation via erfc
-    // Formula: cdf(x) = 1 - erfc(x) / 2, with symmetry for x < 0
-    function cdf(int256 x) public pure returns (int256) {
-        if (x < 0) {
-            return WAD - cdf(-x);
-        }
+    // Formula: cdf(x) = 0.5 * erfc(-x / √2)
+    function cdf(int256 x) internal pure returns (int256) {
+        int256 input = (x * WAD) / SQRT2;
+        int256 _erfc = erfc(-input);
+        return (_erfc * WAD) / TWO;
+    }
 
-        // Compute erfc approximation using rational polynomial
-        int256 numerator = 0;
-        int256 denominator = x + B_0;
-        int256 xSquared = x.rawSMulWad(x);
+    // WAD-scaled signed multiply: (a * b) / 1e18
+    function _mul(int256 a, int256 b) private pure returns (int256) {
+        return (a * b) / WAD;
+    }
 
-        numerator += (C_2_1 * xSquared + C_1_1).rawSMulWad(x);
-        denominator = denominator.rawSMulWad(xSquared + B_2_1 * x + B_1_1);
-        numerator += (C_2_2 * xSquared + C_1_2).rawSMulWad(x);
-        denominator = denominator.rawSMulWad(xSquared + B_2_2 * x + B_1_2);
-        numerator += (C_2_3 * xSquared + C_1_3).rawSMulWad(x);
-        denominator = denominator.rawSMulWad(xSquared + B_2_3 * x + B_1_3);
-        numerator += (C_2_4 * xSquared + C_1_4).rawSMulWad(x);
-        denominator = denominator.rawSMulWad(xSquared + B_2_4 * x + B_1_4);
-        numerator += (C_2_5 * xSquared + C_1_5).rawSMulWad(x);
-        denominator = denominator.rawSMulWad(xSquared + B_2_5 * x + B_1_5);
-
-        int256 m = numerator.rawSDivWad(denominator);
-
-        // erfc = sqrt(2*pi) * m * exp(-x^2/2)
-        int256 expTerm = (-(xSquared / 2)).expWad();
-        int256 erfc = (SQRT_2PI_WAD.rawSMulWad(m)).rawSMulWad(expTerm);
-
-        return WAD - erfc / 2;
+    // Absolute value
+    function _abs(int256 x) private pure returns (uint256) {
+        return x < 0 ? uint256(-x) : uint256(x);
     }
 }

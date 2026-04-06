@@ -8,9 +8,13 @@ library ProbabilityMath {
     using FixedPointMathLib for uint256;
 
     uint256 private constant Q96 = 2 ** 96;
+    uint256 private constant Q192 = 2 ** 192;
 
     //  sqrt(p / (1-p)) * 2^96, clamped to v4 tick bounds
     function probabilityToSqrtPriceX96(uint256 pWad) internal pure returns (uint160 sqrtPriceX96) {
+        if (pWad == 0) return TickMath.MIN_SQRT_PRICE;
+        if (pWad >= 1e18) return TickMath.MAX_SQRT_PRICE;
+
         uint256 ratio = pWad.divWad(1e18 - pWad).sqrtWad();
         uint256 raw = ratio * Q96 / 1e18;
 
@@ -20,9 +24,13 @@ library ProbabilityMath {
         return uint160(raw);
     }
 
-    //  sqrtPrice^2 / (2^192 + sqrtPrice^2)
+    //  p = sqrtPrice^2 / (2^192 + sqrtPrice^2)
     function sqrtPriceX96ToProbability(uint160 sqrtPriceX96) internal pure returns (uint256 pWad) {
-        uint256 priceX96 = uint256(sqrtPriceX96).mulDiv(uint256(sqrtPriceX96), Q96);
-        return priceX96.mulDiv(1e18, 2 ** 192 + priceX96);
+        // Compute price = sqrtPrice^2 / 2^192 in WAD to avoid overflow
+        // price_wad = sqrtPrice * sqrtPrice * 1e18 / 2^192
+        // Use mulDiv to avoid overflow: mulDiv(sqrtPrice, sqrtPrice * 1e18, 2^192)
+        uint256 priceWad = uint256(sqrtPriceX96).mulDiv(uint256(sqrtPriceX96), Q192 / 1e18);
+        // p = price / (1 + price) = priceWad / (1e18 + priceWad)
+        return priceWad * 1e18 / (1e18 + priceWad);
     }
 }
