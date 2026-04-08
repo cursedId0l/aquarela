@@ -24,6 +24,8 @@ abstract contract BaseAquarelaHook is IHooks {
     error OnlyPoolManager();
     error NoV4LiquidityAllowed();
 
+    /// @dev camelCase to match Uniswap v4 ecosystem convention (v4-periphery ImmutableState).
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
     IPoolManager public immutable poolManager;
 
     constructor(IPoolManager _poolManager) {
@@ -31,21 +33,31 @@ abstract contract BaseAquarelaHook is IHooks {
     }
 
     modifier onlyPoolManager() {
-        if (msg.sender != address(poolManager)) revert OnlyPoolManager();
+        _onlyPoolManager();
         _;
+    }
+
+    function _onlyPoolManager() internal view {
+        if (msg.sender != address(poolManager)) revert OnlyPoolManager();
     }
 
     // --- Abstract curve functions (implement in child) ---
 
-    function getAmountOut(uint256 amountIn, Currency input, Currency output, bool zeroForOne)
-        internal
-        virtual
-        returns (uint256 amountOut);
+    function getAmountOut(
+        PoolKey calldata key,
+        uint256 amountIn,
+        Currency input,
+        Currency output,
+        bool zeroForOne
+    ) internal virtual returns (uint256 amountOut);
 
-    function getAmountIn(uint256 amountOut, Currency input, Currency output, bool zeroForOne)
-        internal
-        virtual
-        returns (uint256 amountIn);
+    function getAmountIn(
+        PoolKey calldata key,
+        uint256 amountOut,
+        Currency input,
+        Currency output,
+        bool zeroForOne
+    ) internal virtual returns (uint256 amountIn);
 
     function getHookPermissions() public pure virtual returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
@@ -82,12 +94,12 @@ abstract contract BaseAquarelaHook is IHooks {
         BeforeSwapDelta returnDelta;
 
         if (exactInput) {
-            unspecifiedAmount = getAmountOut(specifiedAmount, specified, unspecified, params.zeroForOne);
+            unspecifiedAmount = getAmountOut(key, specifiedAmount, specified, unspecified, params.zeroForOne);
             specified.take(poolManager, address(this), specifiedAmount, true);
             unspecified.settle(poolManager, address(this), unspecifiedAmount, true);
             returnDelta = toBeforeSwapDelta(specifiedAmount.toInt128(), -unspecifiedAmount.toInt128());
         } else {
-            unspecifiedAmount = getAmountIn(specifiedAmount, unspecified, specified, params.zeroForOne);
+            unspecifiedAmount = getAmountIn(key, specifiedAmount, unspecified, specified, params.zeroForOne);
             unspecified.take(poolManager, address(this), unspecifiedAmount, true);
             specified.settle(poolManager, address(this), specifiedAmount, true);
             returnDelta = toBeforeSwapDelta(-specifiedAmount.toInt128(), unspecifiedAmount.toInt128());

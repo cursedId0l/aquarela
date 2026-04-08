@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {GaussianMath} from "../../src/libraries/GaussianMath.sol";
+import {GaussianMath} from "../../src/libraries/gaussian/GaussianMath.sol";
 
 contract GaussianMathTest is Test {
     uint256 constant TOLERANCE = 1e10;

@@ -10,7 +10,6 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 ///      Original: https://github.com/primitivefinance/solstat/blob/main/src/Gaussian.sol
 library GaussianMath {
     using FixedPointMathLib for int256;
-    using FixedPointMathLib for uint256;
 
     int256 private constant WAD = 1e18;
     int256 private constant TWO = 2e18;
@@ -34,7 +33,7 @@ library GaussianMath {
     int256 private constant ERFC_J = 170872770000000000;
 
     // PDF gives the height of the bell curve at point x
-    // Formula: pdf(x) = e^(-x²/2) / √(2π)
+    // Formula: pdf(x) = e^(-x*x/2) / sqrt(2*pi)
     function pdf(int256 x) internal pure returns (int256) {
         int256 e = (-x * x) / TWO;
         e = e.expWad();
@@ -42,46 +41,41 @@ library GaussianMath {
     }
 
     // Complementary error function: erfc(x) = 1 - erf(x)
-    // erfc(0) = 1, erfc(∞) = 0, erfc(-∞) = 2
+    // erfc(0) = 1, erfc(+inf) = 0, erfc(-inf) = 2
     function erfc(int256 input) internal pure returns (int256 output) {
         if (input == 0) return WAD;
         if (input >= ERFC_DOMAIN_UPPER) return 0;
         if (input <= ERFC_DOMAIN_LOWER) return TWO;
 
-        uint256 z = _abs(input);
-        int256 t = (WAD * WAD) / (WAD + int256(z.divWad(2e18)));
+        // abs of input: safe because we clamped to the erfc domain (+/- 6.24e18) above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 zSigned = int256(input.abs());
+        int256 t = (WAD * WAD) / (WAD + (zSigned * WAD) / TWO);
 
         int256 step;
         {
-            step = ERFC_F + _mul(t, ERFC_G + _mul(t, ERFC_H + _mul(t, ERFC_I + _mul(t, ERFC_J))));
+            step = ERFC_F
+                + t.sMulWad(ERFC_G + t.sMulWad(ERFC_H + t.sMulWad(ERFC_I + t.sMulWad(ERFC_J))));
         }
 
         int256 k;
         {
-            step = _mul(t, ERFC_B + _mul(t, ERFC_C + _mul(t, ERFC_D + _mul(t, ERFC_E + _mul(t, step)))));
-            k = (-1 * _mul(int256(z), int256(z))) - ERFC_A + step;
+            step = t.sMulWad(
+                ERFC_B + t.sMulWad(ERFC_C + t.sMulWad(ERFC_D + t.sMulWad(ERFC_E + t.sMulWad(step))))
+            );
+            k = -zSigned.sMulWad(zSigned) - ERFC_A + step;
         }
 
         int256 exp = k.expWad();
-        int256 r = _mul(t, exp);
+        int256 r = t.sMulWad(exp);
         output = (input < 0) ? TWO - r : r;
     }
 
     // CDF gives the probability that a value falls below x, range [0, 1e18]
-    // Formula: cdf(x) = 0.5 * erfc(-x / √2)
+    // Formula: cdf(x) = 0.5 * erfc(-x / sqrt(2))
     function cdf(int256 x) internal pure returns (int256) {
         int256 input = (x * WAD) / SQRT2;
         int256 _erfc = erfc(-input);
         return (_erfc * WAD) / TWO;
-    }
-
-    // WAD-scaled signed multiply: (a * b) / 1e18
-    function _mul(int256 a, int256 b) private pure returns (int256) {
-        return (a * b) / WAD;
-    }
-
-    // Absolute value
-    function _abs(int256 x) private pure returns (uint256) {
-        return x < 0 ? uint256(-x) : uint256(x);
     }
 }

@@ -20,7 +20,8 @@ library ProbabilityMath {
 
         if (raw < TickMath.MIN_SQRT_PRICE) return TickMath.MIN_SQRT_PRICE;
         if (raw > TickMath.MAX_SQRT_PRICE) return TickMath.MAX_SQRT_PRICE;
-        // safe: clamped to [MIN_SQRT_PRICE, MAX_SQRT_PRICE] above
+        // safe: clamped to [MIN_SQRT_PRICE, MAX_SQRT_PRICE] above (both fit in uint160)
+        // forge-lint: disable-next-line(unsafe-typecast)
         return uint160(raw);
     }
 
