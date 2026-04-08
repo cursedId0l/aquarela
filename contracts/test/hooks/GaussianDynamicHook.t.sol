@@ -24,7 +24,8 @@ contract GaussianDynamicHookTest is Test {
     uint256 internal constant PDF_ZERO_WAD = 0.3989422804e18;
 
     function setUp() public {
-        // Dummy pool manager — getAmountOut/getAmountIn never touch it
+        // Dummy pool manager — getAmountOut/getAmountIn never touch it,
+        // and createPool's poolManager.initialize call is mocked below.
         harness = new GaussianDynamicHookHarness(IPoolManager(address(0xDEAD)));
         key = PoolKey({
             currency0: Currency.wrap(address(0x1111)),
@@ -34,6 +35,14 @@ contract GaussianDynamicHookTest is Test {
             hooks: IHooks(address(harness))
         });
         id = key.toId();
+
+        // Mock poolManager.initialize so createPool doesn't revert.
+        // IPoolManager.initialize(PoolKey, uint160) returns (int24 tick).
+        vm.mockCall(
+            address(0xDEAD),
+            abi.encodeWithSelector(IPoolManager.initialize.selector),
+            abi.encode(int24(0))
+        );
     }
 
     function _balancedReserve(uint256 w) internal pure returns (uint256) {
@@ -48,13 +57,100 @@ contract GaussianDynamicHookTest is Test {
         GaussianDynamicPoolConfig memory c = GaussianDynamicPoolConfig({
             sigma: sigma,
             expiry: uint64(block.timestamp) + expiryOffset,
-            resolver: address(this),
-            resolved: false,
-            outcome: 0,
             totalLiquidity: 0
         });
         harness.setConfig(id, c);
         harness.setReserves(id, r0, r1);
+    }
+
+    // ---------- createPool ----------
+
+    function test_createPool_storesConfig() public {
+        uint128 sigma = 1e18;
+        uint64 expiry = uint64(block.timestamp) + 1 days;
+        uint256 prob = 0.5e18;
+
+        harness.createPool(key, sigma, expiry, prob);
+
+        (uint128 storedSigma, uint64 storedExpiry, uint128 storedTotalLiquidity) = harness.poolConfigs(id);
+        assertEq(storedSigma, sigma);
+        assertEq(storedExpiry, expiry);
+        assertEq(storedTotalLiquidity, 0);
+    }
+
+    function test_createPool_returnsCorrectId() public {
+        uint128 sigma = 1e18;
+        uint64 expiry = uint64(block.timestamp) + 1 days;
+        PoolId returnedId = harness.createPool(key, sigma, expiry, 0.5e18);
+        assertEq(PoolId.unwrap(returnedId), PoolId.unwrap(id));
+    }
+
+    function test_createPool_emitsEvent() public {
+        uint128 sigma = 1e18;
+        uint64 expiry = uint64(block.timestamp) + 1 days;
+        uint256 prob = 0.7e18;
+
+        vm.expectEmit(true, true, false, true, address(harness));
+        emit GaussianDynamicHook.PoolCreated(id, address(this), sigma, expiry, prob);
+        harness.createPool(key, sigma, expiry, prob);
+    }
+
+    function test_createPool_callsPoolManagerInitialize() public {
+        uint64 expiry = uint64(block.timestamp) + 1 days;
+        vm.expectCall(address(0xDEAD), abi.encodeWithSelector(IPoolManager.initialize.selector));
+        harness.createPool(key, 1e18, expiry, 0.5e18);
+    }
+
+    function test_createPool_revertsWrongHook() public {
+        PoolKey memory badKey = PoolKey({
+            currency0: Currency.wrap(address(0x1111)),
+            currency1: Currency.wrap(address(0x2222)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0xBEEF))
+        });
+        vm.expectRevert(GaussianDynamicHook.WrongHook.selector);
+        harness.createPool(badKey, 1e18, uint64(block.timestamp + 1 days), 0.5e18);
+    }
+
+    function test_createPool_revertsSigmaZero() public {
+        vm.expectRevert(GaussianDynamicHook.SigmaZero.selector);
+        harness.createPool(key, 0, uint64(block.timestamp + 1 days), 0.5e18);
+    }
+
+    function test_createPool_revertsExpiryInPast() public {
+        vm.warp(1000);
+        vm.expectRevert(GaussianDynamicHook.ExpiryInPast.selector);
+        harness.createPool(key, 1e18, 500, 0.5e18);
+    }
+
+    function test_createPool_revertsExpiryEqualToNow() public {
+        vm.warp(1000);
+        vm.expectRevert(GaussianDynamicHook.ExpiryInPast.selector);
+        harness.createPool(key, 1e18, 1000, 0.5e18);
+    }
+
+    function test_createPool_revertsProbabilityZero() public {
+        vm.expectRevert(GaussianDynamicHook.InvalidProbability.selector);
+        harness.createPool(key, 1e18, uint64(block.timestamp + 1 days), 0);
+    }
+
+    function test_createPool_revertsProbabilityOne() public {
+        vm.expectRevert(GaussianDynamicHook.InvalidProbability.selector);
+        harness.createPool(key, 1e18, uint64(block.timestamp + 1 days), 1e18);
+    }
+
+    function test_createPool_revertsProbabilityAboveOne() public {
+        vm.expectRevert(GaussianDynamicHook.InvalidProbability.selector);
+        harness.createPool(key, 1e18, uint64(block.timestamp + 1 days), 2e18);
+    }
+
+    function test_createPool_revertsAlreadyInitialized() public {
+        uint64 expiry = uint64(block.timestamp) + 1 days;
+        harness.createPool(key, 1e18, expiry, 0.5e18);
+
+        vm.expectRevert(GaussianDynamicHook.PoolAlreadyInitialized.selector);
+        harness.createPool(key, 1e18, expiry, 0.5e18);
     }
 
     // ---------- getAmountOut happy paths ----------
@@ -142,21 +238,6 @@ contract GaussianDynamicHookTest is Test {
 
     function test_getAmountOut_revertsUninitialized() public {
         vm.expectRevert(GaussianDynamicHook.PoolNotInitialized.selector);
-        harness.exposed_getAmountOut(key, 1e15, true);
-    }
-
-    function test_getAmountOut_revertsResolved() public {
-        _setupPool(1e18, 1 days, 1e18, 1e18);
-        GaussianDynamicPoolConfig memory c = GaussianDynamicPoolConfig({
-            sigma: 1e18,
-            expiry: uint64(block.timestamp) + 1 days,
-            resolver: address(this),
-            resolved: true,
-            outcome: 1,
-            totalLiquidity: 0
-        });
-        harness.setConfig(id, c);
-        vm.expectRevert(GaussianDynamicHook.PoolResolved.selector);
         harness.exposed_getAmountOut(key, 1e15, true);
     }
 

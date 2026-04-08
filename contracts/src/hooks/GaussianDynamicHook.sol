@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {GaussianInvariant} from "../libraries/gaussian/GaussianInvariant.sol";
+import {ProbabilityMath} from "../libraries/ProbabilityMath.sol";
 import {GaussianDynamicPoolConfig} from "../types/GaussianDynamicTypes.sol";
 import {BaseAquarelaHook} from "./BaseAquarelaHook.sol";
 
@@ -19,9 +21,21 @@ contract GaussianDynamicHook is BaseAquarelaHook {
 
     error PoolNotInitialized();
     error PoolExpired();
-    error PoolResolved();
     error InsufficientLiquidity();
     error SwapExceedsReserves();
+    error PoolAlreadyInitialized();
+    error ExpiryInPast();
+    error SigmaZero();
+    error InvalidProbability();
+    error WrongHook();
+
+    event PoolCreated(
+        PoolId indexed id,
+        address indexed creator,
+        uint128 sigma,
+        uint64 expiry,
+        uint256 initialProbabilityWad
+    );
 
     mapping(PoolId => GaussianDynamicPoolConfig) public poolConfigs;
     // @dev keep track of reserves in the hook because liquidity decreases
@@ -31,9 +45,47 @@ contract GaussianDynamicHook is BaseAquarelaHook {
 
     constructor(IPoolManager _poolManager) BaseAquarelaHook(_poolManager) {}
 
-    // TODO: createPool() — stores config, calls poolManager.initialize()
+    /// @notice Create a new pm-AMM prediction market pool.
+    /// @param key The v4 PoolKey. `key.hooks` must point to this contract.
+    /// @param sigma Base liquidity parameter (WAD). Paper notation: L_0.
+    /// @param expiry Unix timestamp at which swaps stop.
+    /// @param initialProbabilityWad Starting YES probability in WAD, must be in (0, 1e18).
+    /// @return id The PoolId of the newly created pool.
+    function createPool(
+        PoolKey calldata key,
+        uint128 sigma,
+        uint64 expiry,
+        uint256 initialProbabilityWad
+    ) external returns (PoolId id) {
+        // --- Validation ---
+        if (address(key.hooks) != address(this)) revert WrongHook();
+        if (sigma == 0) revert SigmaZero();
+        if (expiry <= block.timestamp) revert ExpiryInPast();
+        if (initialProbabilityWad == 0 || initialProbabilityWad >= 1e18) revert InvalidProbability();
+
+        id = key.toId();
+        if (poolConfigs[id].expiry != 0) revert PoolAlreadyInitialized();
+
+        // --- Store config ---
+        poolConfigs[id] = GaussianDynamicPoolConfig({
+            sigma: sigma,
+            expiry: expiry,
+            totalLiquidity: 0
+        });
+
+        // --- Register with v4 ---
+        // sqrtPriceX96 is stored in v4's slot0 at initialization and never
+        // updated afterward (our beforeSwap nets the swap to zero). We set it
+        // from the target probability so integrators reading v4 state at least
+        // see the correct starting price.
+        uint160 sqrtPriceX96 = ProbabilityMath.probabilityToSqrtPriceX96(initialProbabilityWad);
+        poolManager.initialize(key, sqrtPriceX96);
+
+        emit PoolCreated(id, msg.sender, sigma, expiry, initialProbabilityWad);
+    }
+
     // TODO: addLiquidity() — takes tokens, updates reserves
-    // TODO: resolvePool() — trusted resolver sets outcome
+    // TODO: removeLiquidity() — LPs withdraw their share; works before or after expiry
 
     /// @notice Compute output amount for an exact-input swap and update pool state.
     /// @dev Solves the pm-AMM invariant for the new reserve using Newton's method.
@@ -100,12 +152,11 @@ contract GaussianDynamicHook is BaseAquarelaHook {
 
     /// @notice Load per-pool state and validate the pool can serve a swap.
     /// @dev Shared preamble for getAmountOut / getAmountIn.
-    ///      Reverts: PoolNotInitialized, PoolResolved, PoolExpired, InsufficientLiquidity.
+    ///      Reverts: PoolNotInitialized, PoolExpired, InsufficientLiquidity.
     function _loadValidPool(PoolId id) private view returns (uint256 x, uint256 y, uint256 wWad) {
         GaussianDynamicPoolConfig memory config = poolConfigs[id];
 
         if (config.expiry == 0) revert PoolNotInitialized();
-        if (config.resolved) revert PoolResolved();
         if (block.timestamp >= config.expiry) revert PoolExpired();
 
         x = reserve0[id];
